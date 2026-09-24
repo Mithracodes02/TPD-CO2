@@ -1,4 +1,5 @@
 import io
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -15,25 +16,46 @@ st.set_page_config(
 st.title("🧪 CO₂-TPD Data Processor & Plotter")
 st.markdown("Instantly parse Excel files, calculate desorption metrics, and generate publication-ready TCD vs. Temperature figures.")
 
+def clean_numeric_series(series):
+    """Converts a series to numeric, stripping units or replacing commas with dots if needed."""
+    def extract_num(val):
+        if pd.isna(val):
+            return np.nan
+        val_str = str(val).strip().replace(',', '.')
+        match = re.search(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', val_str)
+        if match:
+            return float(match.group(0))
+        return np.nan
+
+    return series.apply(extract_num)
+
+
 # --- SIDEBAR: DATA UPLOAD & COLUMN PARSING ---
 st.sidebar.header("1. Data Input & Mass Normalization")
 uploaded_file = st.sidebar.file_uploader("Upload TPD Excel (.xlsx / .xls)", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
     try:
-        # Determine appropriate engine based on file extension
+        # Determine engine
         filename = uploaded_file.name.lower()
-        if filename.endswith(".xls"):
-            engine = "xlrd"
-        else:
-            engine = "openpyxl"
+        engine = "xlrd" if filename.endswith(".xls") else "openpyxl"
 
-        # Load Excel file with explicit engine
+        # Read sheet list
         excel_file = pd.ExcelFile(uploaded_file, engine=engine)
         sheet_name = st.sidebar.selectbox("Select Excel Sheet", excel_file.sheet_names)
         
-        # Row header skip selector
-        header_row = st.sidebar.number_input("Header Row (0-indexed)", min_value=0, max_value=50, value=0)
+        # Read unparsed preview to auto-detect header row
+        raw_preview = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None, nrows=30, engine=engine)
+        
+        # Auto-detect probable header row (first row with multiple string values followed by numbers)
+        suggested_header = 0
+        for i, row in raw_preview.iterrows():
+            num_count = sum(pd.to_numeric(row, errors='coerce').notna())
+            if num_count >= 2:
+                suggested_header = max(0, i - 1) if i > 0 else 0
+                break
+
+        header_row = st.sidebar.number_input("Header Row (0-indexed)", min_value=0, max_value=50, value=suggested_header)
         df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row, engine=engine)
         
         if df.empty:
@@ -43,13 +65,18 @@ if uploaded_file is not None:
         st.sidebar.subheader("Column Mapping")
         all_cols = list(df.columns)
         
-        # Smart search for probable temperature and TCD columns
-        temp_default = next((i for i, c in enumerate(all_cols) if "temp" in str(c).lower()), 0)
-        tcd_default = next((i for i, c in enumerate(all_cols) if "tcd" in str(c).lower() or "signal" in str(c).lower()), min(1, len(all_cols)-1))
+        # Smart search for probable columns
+        temp_default = next((i for i, c in enumerate(all_cols) if "temp" in str(c).lower() or "t (°c)" in str(c).lower()), 0)
+        tcd_default = next((i for i, c in enumerate(all_cols) if "tcd" in str(c).lower() or "signal" in str(c).lower() or "ms" in str(c).lower()), min(1, len(all_cols)-1))
         
-        temp_col = st.sidebar.selectbox("Temperature (°C) Column", all_cols, index=temp_default)
+        temp_col = st.sidebar.selectbox("Temperature Column", all_cols, index=temp_default)
         tcd_col = st.sidebar.selectbox("TCD Signal Column", all_cols, index=tcd_default)
         
+        # Raw Data Inspection Expander
+        with st.sidebar.expander("🔍 Inspect Raw Selection"):
+            st.write("First 15 rows of selected columns:")
+            st.dataframe(df[[temp_col, tcd_col]].head(15))
+
         # Sample parameters
         sample_mass = st.sidebar.number_input("Sample Mass (mg)", min_value=0.1, value=100.0, step=1.0)
         baseline_subtraction = st.sidebar.checkbox("Apply Linear Baseline Correction", value=True)
@@ -58,30 +85,29 @@ if uploaded_file is not None:
         clean_df = df[[temp_col, tcd_col]].copy()
         clean_df.columns = ["Temperature", "TCD"]
         
-        # Coerce numeric values and remove non-numeric rows (e.g. text/units)
-        clean_df["Temperature"] = pd.to_numeric(clean_df["Temperature"], errors="coerce")
-        clean_df["TCD"] = pd.to_numeric(clean_df["TCD"], errors="coerce")
-        clean_df = clean_df.dropna().sort_values("Temperature").reset_index(drop=True)
+        # Strip text/units and extract numeric values
+        clean_df["Temperature"] = clean_numeric_series(clean_df["Temperature"])
+        clean_df["TCD"] = clean_numeric_series(clean_df["TCD"])
         
-        # Validate cleaned DataFrame size before indexing
+        clean_df = clean_df.dropna(subset=["Temperature", "TCD"]).sort_values("Temperature").reset_index(drop=True)
+        
         if len(clean_df) < 2:
-            st.error("Not enough valid numeric data points found in the selected columns. Please verify your column selections or adjust the Header Row.")
+            st.error("Not enough valid numeric data points found in the selected columns. Expand 'Inspect Raw Selection' in the sidebar to check if your columns contain numbers or if you need to adjust the Header Row.")
             st.stop()
 
-        # Mass-normalized signal
-        clean_df["TCD_Norm"] = (clean_df["TCD"] / sample_mass) * 1000  # Signal per gram basis
+        # Mass-normalized signal (per gram of catalyst)
+        clean_df["TCD_Norm"] = (clean_df["TCD"] / sample_mass) * 1000
         
-        # Linear baseline offset subtraction safely applied with bounded bounds
+        # Baseline correction
         if baseline_subtraction:
             start_val = clean_df["TCD_Norm"].iloc[0]
             end_val = clean_df["TCD_Norm"].iloc[-1]
             baseline = np.linspace(start_val, end_val, len(clean_df))
-            clean_df["TCD_Processed"] = clean_df["TCD_Norm"] - baseline
-            clean_df["TCD_Processed"] = clean_df["TCD_Processed"].clip(lower=0)
+            clean_df["TCD_Processed"] = (clean_df["TCD_Norm"] - baseline).clip(lower=0)
         else:
             clean_df["TCD_Processed"] = clean_df["TCD_Norm"]
 
-        # Peak Integration (Simpson's Rule)
+        # Simpson Integration
         total_desorption_area = simpson(y=clean_df["TCD_Processed"].values, x=clean_df["Temperature"].values)
 
         # --- GRAPH CUSTOMIZATION CONTROLS ---
@@ -100,7 +126,7 @@ if uploaded_file is not None:
             "10. Boxed Border Classic (Analytical)"
         ]
         
-        selected_preset = st.sidebar.selectbox("Select Graph Style Preset (10 Layouts)", LAYOUT_PRESETS)
+        selected_preset = st.sidebar.selectbox("Select Graph Style Preset", LAYOUT_PRESETS)
         
         with st.sidebar.expander("Axis & Font Customization"):
             font_family = st.selectbox("Font Family", ["DejaVu Sans", "DejaVu Serif", "Arial", "Times New Roman", "Courier New"])
@@ -116,7 +142,6 @@ if uploaded_file is not None:
         # --- PLOTTING ENGINE ---
         fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=150)
         
-        # Apply Selected Preset Formatting
         style_color = "#1f77b4"
         bg_color = "white"
         show_box = True
@@ -158,11 +183,9 @@ if uploaded_file is not None:
 
         plt.rcParams["font.family"] = font_family
 
-        # Plot Data Series
         ax.plot(clean_df["Temperature"], clean_df["TCD_Processed"], color=style_color, linewidth=line_width, label="CO₂ Desorption")
         ax.fill_between(clean_df["Temperature"], clean_df["TCD_Processed"], color=style_color, alpha=0.15)
         
-        # Axis Labels & Titles
         ax.set_xlabel("Temperature (°C)", fontsize=label_size, fontweight=font_weight)
         ax.set_ylabel("TCD Signal (a.u. / g_cat)", fontsize=label_size, fontweight=font_weight)
         ax.set_title("CO₂ Temperature-Programmed Desorption", fontsize=title_size, fontweight=font_weight)
@@ -184,7 +207,6 @@ if uploaded_file is not None:
         with col1:
             st.pyplot(fig)
             
-            # Export plot buffer
             img_buffer = io.BytesIO()
             fig.savefig(img_buffer, format="png", dpi=dpi_val, bbox_inches="tight")
             st.download_button(
