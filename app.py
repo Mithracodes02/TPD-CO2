@@ -13,8 +13,8 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🧪 CO₂-TPD Data Processor & Plotter")
-st.markdown("Instantly parse multi-block Excel files (e.g., Micromeritics), calculate desorption metrics, and generate publication-ready plots.")
+st.title("🧪 CO₂-TPD Data Processor, Site Classifier & Plotter")
+st.markdown("Instantly parse multi-block Excel files, calculate basic site distributions (Weak, Medium, Strong), and generate publication-ready TPD graphs.")
 
 def clean_numeric_series(series):
     """Converts a pandas series to numeric floats, stripping text, units, and converting European decimal commas."""
@@ -45,28 +45,24 @@ if uploaded_file is not None:
         excel_file = pd.ExcelFile(uploaded_file, engine=engine)
         sheet_name = st.sidebar.selectbox("Select Excel Sheet", excel_file.sheet_names)
         
-        # Read raw headerless sheet preview to locate multi-block data
+        # Read raw preview to locate header
         raw_full = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None, engine=engine)
         
-        # Search for row containing 'TCD Signal (a.u.) vs. Temperature' or 'Temperat'
         default_header_idx = 23
         for r_idx, row_vals in raw_full.iterrows():
             row_str = " ".join([str(v) for v in row_vals.values if pd.notna(v)])
             if "Temperature" in row_str and "TCD" in row_str:
-                default_header_idx = r_idx + 3  # Header is usually 3 rows below section label
+                default_header_idx = r_idx + 3
                 break
 
         header_row = st.sidebar.number_input("Header Row (0-indexed)", min_value=0, max_value=100, value=default_header_idx)
         
-        # Load dataset without header first to select exact column letter/index positionally
         df_raw = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None, engine=engine)
         
-        # Create user selection list showing Column Letter + Header Name
+        # Column selection mapping
         header_vals = df_raw.iloc[header_row].values
         col_options = []
         for i, val in enumerate(header_vals):
-            col_letter = pd.Series([i + 1]).apply(lambda x: pd.Series(x).get(0)).values[0]
-            # Convert numeric index to Excel column name (A, B, C... M, N)
             col_name = ""
             temp_i = i
             while temp_i >= 0:
@@ -77,37 +73,27 @@ if uploaded_file is not None:
             col_options.append(f"Col {col_name} (Idx {i}): {header_str}")
 
         st.sidebar.subheader("Column Mapping")
-        
-        # Default to Column M (12) for Temp and Column N (13) for TCD if present
         def_temp_col = 12 if len(col_options) > 12 else 0
         def_tcd_col = 13 if len(col_options) > 13 else min(1, len(col_options)-1)
 
         temp_col_sel = st.sidebar.selectbox("Temperature Column", col_options, index=def_temp_col)
         tcd_col_sel = st.sidebar.selectbox("TCD Signal Column", col_options, index=def_tcd_col)
         
-        # Extract 0-indexed column positions
         temp_idx = int(temp_col_sel.split("Idx ")[1].split(")")[0])
         tcd_idx = int(tcd_col_sel.split("Idx ")[1].split(")")[0])
 
-        # Slice target numeric data starting right after header_row
         data_df = df_raw.iloc[header_row + 1:].copy()
-        
-        # Raw Data Inspection Box
-        with st.sidebar.expander("🔍 Inspect Selected Columns", expanded=True):
-            inspect_df = pd.DataFrame({
-                "Temp Raw": data_df.iloc[:, temp_idx].head(10),
-                "TCD Raw": data_df.iloc[:, tcd_idx].head(10)
-            })
-            st.dataframe(inspect_df)
-            
-            valid_pts = (clean_numeric_series(data_df.iloc[:, temp_idx]).notna() & 
-                         clean_numeric_series(data_df.iloc[:, tcd_idx]).notna()).sum()
-            st.info(f"Valid numeric rows found: **{valid_pts}**")
 
         # Sample & Baseline Parameters
         sample_mass = st.sidebar.number_input("Sample Mass (mg)", min_value=0.1, value=50.0, step=0.1)
         baseline_subtraction = st.sidebar.checkbox("Apply Linear Baseline Correction", value=True)
         
+        # --- BASIC SITES RANGE CONFIGURATION ---
+        st.sidebar.header("2. Basic Site Temperature Boundaries")
+        weak_max = st.sidebar.number_input("Weak / Medium Boundary (°C)", min_value=50.0, max_value=300.0, value=200.0, step=10.0)
+        medium_max = st.sidebar.number_input("Medium / Strong Boundary (°C)", min_value=200.0, max_value=600.0, value=400.0, step=10.0)
+        show_site_regions = st.sidebar.checkbox("Shade Basic Site Regions on Graph", value=True)
+
         # --- CLEANING & PRE-PROCESSING DATA ---
         clean_df = pd.DataFrame({
             "Temperature": clean_numeric_series(data_df.iloc[:, temp_idx]),
@@ -121,7 +107,7 @@ if uploaded_file is not None:
         # Mass normalization (Signal per gram basis)
         clean_df["TCD_Norm"] = (clean_df["TCD"] / sample_mass) * 1000
         
-        # Linear baseline subtraction
+        # Baseline subtraction
         if baseline_subtraction:
             start_val = clean_df["TCD_Norm"].iloc[0]
             end_val = clean_df["TCD_Norm"].iloc[-1]
@@ -130,11 +116,23 @@ if uploaded_file is not None:
         else:
             clean_df["TCD_Processed"] = clean_df["TCD_Norm"]
 
-        # Simpson Integration
+        # --- REGIONAL INTEGRATION & BASIC SITE ANALYSIS ---
         total_desorption_area = simpson(y=clean_df["TCD_Processed"].values, x=clean_df["Temperature"].values)
+        
+        df_weak = clean_df[clean_df["Temperature"] < weak_max]
+        df_med = clean_df[(clean_df["Temperature"] >= weak_max) & (clean_df["Temperature"] < medium_max)]
+        df_strong = clean_df[clean_df["Temperature"] >= medium_max]
+
+        area_weak = simpson(y=df_weak["TCD_Processed"].values, x=df_weak["Temperature"].values) if len(df_weak) > 1 else 0.0
+        area_med = simpson(y=df_med["TCD_Processed"].values, x=df_med["Temperature"].values) if len(df_med) > 1 else 0.0
+        area_strong = simpson(y=df_strong["TCD_Processed"].values, x=df_strong["Temperature"].values) if len(df_strong) > 1 else 0.0
+
+        pct_weak = (area_weak / total_desorption_area * 100) if total_desorption_area > 0 else 0
+        pct_med = (area_med / total_desorption_area * 100) if total_desorption_area > 0 else 0
+        pct_strong = (area_strong / total_desorption_area * 100) if total_desorption_area > 0 else 0
 
         # --- GRAPH CUSTOMIZATION CONTROLS ---
-        st.sidebar.header("2. Publication Graph Settings")
+        st.sidebar.header("3. Publication Graph Settings")
         
         LAYOUT_PRESETS = [
             "1. Nature / Science (Minimalist Serif)",
@@ -206,12 +204,21 @@ if uploaded_file is not None:
 
         plt.rcParams["font.family"] = font_family
 
-        ax.plot(clean_df["Temperature"], clean_df["TCD_Processed"], color=style_color, linewidth=line_width, label="CO₂ Desorption")
-        ax.fill_between(clean_df["Temperature"], clean_df["TCD_Processed"], color=style_color, alpha=0.15)
+        # Main TPD curve
+        ax.plot(clean_df["Temperature"], clean_df["TCD_Processed"], color=style_color, linewidth=line_width, label="CO₂ Desorption Signal")
         
+        # Shade Basic Site Regions
+        if show_site_regions:
+            ax.fill_between(df_weak["Temperature"], df_weak["TCD_Processed"], color="#1f77b4", alpha=0.3, label="Weak Sites (<200°C)")
+            ax.fill_between(df_med["Temperature"], df_med["TCD_Processed"], color="#ff7f0e", alpha=0.3, label="Medium Sites (200-400°C)")
+            ax.fill_between(df_strong["Temperature"], df_strong["TCD_Processed"], color="#d62728", alpha=0.3, label="Strong Sites (>400°C)")
+            ax.legend(fontsize=tick_size - 1, frameon=False)
+        else:
+            ax.fill_between(clean_df["Temperature"], clean_df["TCD_Processed"], color=style_color, alpha=0.15)
+
         ax.set_xlabel("Temperature (°C)", fontsize=label_size, fontweight=font_weight)
         ax.set_ylabel("TCD Signal (a.u. / g_cat)", fontsize=label_size, fontweight=font_weight)
-        ax.set_title("CO₂ Temperature-Programmed Desorption", fontsize=title_size, fontweight=font_weight)
+        ax.set_title("CO₂ Temperature-Programmed Desorption Profile", fontsize=title_size, fontweight=font_weight)
         
         ax.tick_params(axis="both", which="major", labelsize=tick_size)
         ax.xaxis.set_minor_locator(AutoMinorLocator())
@@ -235,22 +242,27 @@ if uploaded_file is not None:
             st.download_button(
                 label="📥 Download High-Res Plot (PNG)",
                 data=img_buffer.getvalue(),
-                file_name="CO2_TPD_Publication_Graph.png",
+                file_name="CO2_TPD_Basic_Sites_Graph.png",
                 mime="image/png"
             )
 
         with col2:
-            st.subheader("📊 Desorption Metrics")
-            st.metric("Total Integrated Area", f"{total_desorption_area:.2f} a.u.*°C/g")
+            st.subheader("📊 Basic Sites Distribution")
             
-            max_idx = clean_df["TCD_Processed"].idxmax()
-            peak_temp = clean_df.loc[max_idx, "Temperature"]
-            st.metric("Peak Temperature (T_max)", f"{peak_temp:.1f} °C")
-            st.metric("Sample Weight Used", f"{sample_mass} mg")
+            summary_table = pd.DataFrame({
+                "Basic Site Type": ["Weak Sites", "Medium Sites", "Strong Sites", "Total"],
+                "Temperature Range": [f"< {weak_max:.0f} °C", f"{weak_max:.0f} – {medium_max:.0f} °C", f"> {medium_max:.0f} °C", "Full Spectrum"],
+                "Desorption Area (a.u.*°C/g)": [f"{area_weak:.2f}", f"{area_med:.2f}", f"{area_strong:.2f}", f"{total_desorption_area:.2f}"],
+                "Distribution (%)": [f"{pct_weak:.1f} %", f"{pct_med:.1f} %", f"{pct_strong:.1f} %", "100.0 %"]
+            })
+            
+            st.dataframe(summary_table, hide_index=True, use_container_width=True)
             
             st.markdown("---")
-            st.subheader("📋 Parsed Data Sample")
-            st.dataframe(clean_df[["Temperature", "TCD_Processed"]].head(10), use_container_width=True)
+            max_idx = clean_df["TCD_Processed"].idxmax()
+            peak_temp = clean_df.loc[max_idx, "Temperature"]
+            st.metric("Desorption Peak Temperature (T_max)", f"{peak_temp:.1f} °C")
+            st.metric("Sample Weight Used", f"{sample_mass} mg")
 
     except Exception as e:
         st.error(f"Error processing data file: {e}")
