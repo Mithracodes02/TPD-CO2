@@ -8,16 +8,19 @@ from matplotlib.ticker import AutoMinorLocator
 from scipy.integrate import simpson
 
 st.set_page_config(
-    page_title="CO2-TPD Analyzer & Plotter",
+    page_title="CO2-TPD Advanced Analyzer",
     page_icon="🧪",
     layout="wide",
 )
 
-st.title("🧪 CO₂-TPD Data Processor, Site Classifier & Plotter")
-st.markdown("Instantly parse multi-block Excel files, calculate basic site distributions (Weak, Medium, Strong), and generate publication-ready TPD graphs.")
+st.title("🧪 CO₂-TPD Advanced Analyzer, Benchmarker & Plotter")
+st.markdown(
+    "Parse multi-block TPD files, customize publication graphics, quantify basicity distribution, "
+    "and obtain literature-benchmarked insights for $\\text{CO}_2$ hydrogenation to methanol."
+)
 
 def clean_numeric_series(series):
-    """Converts a pandas series to numeric floats, stripping text, units, and converting European decimal commas."""
+    """Converts a pandas series to numeric floats, handling text, units, and European commas."""
     def extract_num(val):
         if pd.isna(val):
             return np.nan
@@ -33,8 +36,8 @@ def clean_numeric_series(series):
     return series.apply(extract_num)
 
 
-# --- SIDEBAR: DATA UPLOAD & COLUMN PARSING ---
-st.sidebar.header("1. Data Input & Mass Normalization")
+# --- SIDEBAR: 1. DATA INPUT & MAPPING ---
+st.sidebar.header("1. Data Input & Mapping")
 uploaded_file = st.sidebar.file_uploader("Upload TPD Excel (.xlsx / .xls)", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
@@ -45,7 +48,6 @@ if uploaded_file is not None:
         excel_file = pd.ExcelFile(uploaded_file, engine=engine)
         sheet_name = st.sidebar.selectbox("Select Excel Sheet", excel_file.sheet_names)
         
-        # Read raw preview to locate header
         raw_full = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None, engine=engine)
         
         default_header_idx = 23
@@ -56,10 +58,8 @@ if uploaded_file is not None:
                 break
 
         header_row = st.sidebar.number_input("Header Row (0-indexed)", min_value=0, max_value=100, value=default_header_idx)
-        
         df_raw = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None, engine=engine)
         
-        # Column selection mapping
         header_vals = df_raw.iloc[header_row].values
         col_options = []
         for i, val in enumerate(header_vals):
@@ -72,7 +72,6 @@ if uploaded_file is not None:
             header_str = str(val) if pd.notna(val) else "Unnamed"
             col_options.append(f"Col {col_name} (Idx {i}): {header_str}")
 
-        st.sidebar.subheader("Column Mapping")
         def_temp_col = 12 if len(col_options) > 12 else 0
         def_tcd_col = 13 if len(col_options) > 13 else min(1, len(col_options)-1)
 
@@ -84,30 +83,26 @@ if uploaded_file is not None:
 
         data_df = df_raw.iloc[header_row + 1:].copy()
 
-        # Sample & Baseline Parameters
         sample_mass = st.sidebar.number_input("Sample Mass (mg)", min_value=0.1, value=50.0, step=0.1)
         baseline_subtraction = st.sidebar.checkbox("Apply Linear Baseline Correction", value=True)
         
-        # --- BASIC SITES RANGE CONFIGURATION ---
+        # --- SIDEBAR: 2. BASIC SITE BOUNDARIES ---
         st.sidebar.header("2. Basic Site Temperature Boundaries")
         weak_max = st.sidebar.number_input("Weak / Medium Boundary (°C)", min_value=50.0, max_value=300.0, value=200.0, step=10.0)
         medium_max = st.sidebar.number_input("Medium / Strong Boundary (°C)", min_value=200.0, max_value=600.0, value=400.0, step=10.0)
-        show_site_regions = st.sidebar.checkbox("Shade Basic Site Regions on Graph", value=True)
 
-        # --- CLEANING & PRE-PROCESSING DATA ---
+        # --- DATA PRE-PROCESSING ---
         clean_df = pd.DataFrame({
             "Temperature": clean_numeric_series(data_df.iloc[:, temp_idx]),
             "TCD": clean_numeric_series(data_df.iloc[:, tcd_idx])
         }).dropna().sort_values("Temperature").reset_index(drop=True)
         
         if len(clean_df) < 2:
-            st.error("Not enough numeric data points found. Adjust 'Header Row' to row 23 or check column selections.")
+            st.error("Not enough numeric data points found. Adjust 'Header Row' or check column mapping.")
             st.stop()
 
-        # Mass normalization (Signal per gram basis)
         clean_df["TCD_Norm"] = (clean_df["TCD"] / sample_mass) * 1000
         
-        # Baseline subtraction
         if baseline_subtraction:
             start_val = clean_df["TCD_Norm"].iloc[0]
             end_val = clean_df["TCD_Norm"].iloc[-1]
@@ -116,8 +111,8 @@ if uploaded_file is not None:
         else:
             clean_df["TCD_Processed"] = clean_df["TCD_Norm"]
 
-        # --- REGIONAL INTEGRATION & BASIC SITE ANALYSIS ---
-        total_desorption_area = simpson(y=clean_df["TCD_Processed"].values, x=clean_df["Temperature"].values)
+        # --- REGIONAL INTEGRATION ---
+        total_area = simpson(y=clean_df["TCD_Processed"].values, x=clean_df["Temperature"].values)
         
         df_weak = clean_df[clean_df["Temperature"] < weak_max]
         df_med = clean_df[(clean_df["Temperature"] >= weak_max) & (clean_df["Temperature"] < medium_max)]
@@ -127,144 +122,175 @@ if uploaded_file is not None:
         area_med = simpson(y=df_med["TCD_Processed"].values, x=df_med["Temperature"].values) if len(df_med) > 1 else 0.0
         area_strong = simpson(y=df_strong["TCD_Processed"].values, x=df_strong["Temperature"].values) if len(df_strong) > 1 else 0.0
 
-        pct_weak = (area_weak / total_desorption_area * 100) if total_desorption_area > 0 else 0
-        pct_med = (area_med / total_desorption_area * 100) if total_desorption_area > 0 else 0
-        pct_strong = (area_strong / total_desorption_area * 100) if total_desorption_area > 0 else 0
+        pct_weak = (area_weak / total_area * 100) if total_area > 0 else 0
+        pct_med = (area_med / total_area * 100) if total_area > 0 else 0
+        pct_strong = (area_strong / total_area * 100) if total_area > 0 else 0
 
-        # --- GRAPH CUSTOMIZATION CONTROLS ---
-        st.sidebar.header("3. Publication Graph Settings")
+        # --- SIDEBAR: 3. GRAPHIC & AXIS CONTROLS ---
+        st.sidebar.header("3. Graph Customization & Axes")
         
-        LAYOUT_PRESETS = [
-            "1. Nature / Science (Minimalist Serif)",
-            "2. ACS Catalysis (Classic Bold Standard)",
-            "3. Elsevier / Calphad (Clean Sans-Serif)",
-            "4. Dark High-Contrast (Presentation)",
-            "5. Royal Blue & Steel (Modern)",
-            "6. Emerald / Forest Accent",
-            "7. Crimson Accent",
-            "8. Greyscale Monochrome (Print Safe)",
-            "9. Vibrant Rainbow Spectrum",
-            "10. Boxed Border Classic (Analytical)"
-        ]
-        
-        selected_preset = st.sidebar.selectbox("Select Graph Style Preset", LAYOUT_PRESETS)
-        
-        with st.sidebar.expander("Axis & Font Customization"):
+        with st.sidebar.expander("✏️ Axis Titles & Font Formatting", expanded=False):
+            title_text = st.text_input("Plot Title", "CO₂ Temperature-Programmed Desorption Profile")
+            xlabel_text = st.text_input("X-Axis Label", "Temperature (°C)")
+            ylabel_text = st.text_input("Y-Axis Label", "TCD Signal (a.u. / g_cat)")
             font_family = st.selectbox("Font Family", ["DejaVu Sans", "DejaVu Serif", "Arial", "Times New Roman", "Courier New"])
             title_size = st.slider("Title Font Size", 8, 24, 14)
             label_size = st.slider("Axis Label Font Size", 8, 20, 12)
             tick_size = st.slider("Tick Font Size", 6, 16, 10)
             font_weight = st.selectbox("Font Weight", ["normal", "bold"])
+
+        with st.sidebar.expander("🎨 Color Customization", expanded=False):
+            color_mode = st.radio("Shading Style", ["Shade by Basic Site Regions", "Single Color Peak Fill"])
+            curve_color = st.color_picker("Main Curve Line Color", "#1F77B4")
+            weak_color = st.color_picker("Weak Sites Fill Color", "#3182BD")
+            med_color = st.color_picker("Medium Sites Fill Color", "#E6550D")
+            strong_color = st.color_picker("Strong Sites Fill Color", "#DE2D26")
+            single_fill_color = st.color_picker("Single Fill Color", "#6BAED6")
+            fill_alpha = st.slider("Fill Transparency (Alpha)", 0.0, 1.0, 0.35, step=0.05)
+
+        with st.sidebar.expander("📐 Scale Ranges & Rescaling", expanded=False):
+            auto_x = st.checkbox("Auto X-Axis Range", value=True)
+            min_temp, max_temp = float(clean_df["Temperature"].min()), float(clean_df["Temperature"].max())
+            if not auto_x:
+                x_min = st.number_input("X Min (°C)", value=min_temp, step=10.0)
+                x_max = st.number_input("X Max (°C)", value=max_temp, step=10.0)
+            
+            auto_y = st.checkbox("Auto Y-Axis Range", value=True)
+            min_tcd, max_tcd = float(clean_df["TCD_Processed"].min()), float(clean_df["TCD_Processed"].max())
+            if not auto_y:
+                y_min = st.number_input("Y Min", value=0.0, step=0.01)
+                y_max = st.number_input("Y Max", value=max_tcd * 1.1, step=0.01)
+
+        with st.sidebar.expander("📏 Ticks, Lines & Canvas Options", expanded=False):
+            show_major_ticks = st.checkbox("Show Major Ticks", value=True)
+            show_minor_ticks = st.checkbox("Show Minor Ticks", value=True)
+            show_grid = st.checkbox("Show Grid Lines", value=False)
+            show_box_border = st.checkbox("Box Frame (Top/Right Spines)", value=True)
             line_width = st.slider("Line Width (pt)", 0.5, 4.0, 1.5, step=0.25)
-            fig_width = st.slider("Figure Width (inches)", 3.0, 10.0, 6.0, step=0.5)
-            fig_height = st.slider("Figure Height (inches)", 2.5, 8.0, 4.5, step=0.5)
-            dpi_val = st.number_input("Export Resolution (DPI)", value=600, step=100)
+            fig_width = st.slider("Figure Width (in)", 3.0, 10.0, 6.5, step=0.5)
+            fig_height = st.slider("Figure Height (in)", 2.5, 8.0, 4.5, step=0.5)
+            dpi_val = st.number_input("Export DPI", value=600, step=100)
 
         # --- PLOTTING ENGINE ---
-        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=150)
-        
-        style_color = "#1f77b4"
-        bg_color = "white"
-        show_box = True
-        grid_enabled = False
-        
-        if "Nature" in selected_preset:
-            font_family = "DejaVu Serif"
-            style_color = "#2b2b2b"
-            show_box = False
-        elif "ACS" in selected_preset:
-            font_family = "DejaVu Sans"
-            style_color = "#b22222"
-            font_weight = "bold"
-        elif "Elsevier" in selected_preset:
-            font_family = "DejaVu Sans"
-            style_color = "#005580"
-        elif "Dark" in selected_preset:
-            bg_color = "#121212"
-            style_color = "#00e676"
-            fig.patch.set_facecolor(bg_color)
-            ax.set_facecolor(bg_color)
-            ax.xaxis.label.set_color("white")
-            ax.yaxis.label.set_color("white")
-            ax.tick_params(colors="white")
-        elif "Royal Blue" in selected_preset:
-            style_color = "#4169E1"
-            grid_enabled = True
-        elif "Emerald" in selected_preset:
-            style_color = "#00875A"
-        elif "Crimson" in selected_preset:
-            style_color = "#DC143C"
-        elif "Greyscale" in selected_preset:
-            style_color = "#000000"
-        elif "Vibrant" in selected_preset:
-            style_color = "#FF4500"
-        elif "Boxed" in selected_preset:
-            style_color = "#111111"
-            grid_enabled = True
-
         plt.rcParams["font.family"] = font_family
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=150)
 
-        # Main TPD curve
-        ax.plot(clean_df["Temperature"], clean_df["TCD_Processed"], color=style_color, linewidth=line_width, label="CO₂ Desorption Signal")
-        
-        # Shade Basic Site Regions
-        if show_site_regions:
-            ax.fill_between(df_weak["Temperature"], df_weak["TCD_Processed"], color="#1f77b4", alpha=0.3, label="Weak Sites (<200°C)")
-            ax.fill_between(df_med["Temperature"], df_med["TCD_Processed"], color="#ff7f0e", alpha=0.3, label="Medium Sites (200-400°C)")
-            ax.fill_between(df_strong["Temperature"], df_strong["TCD_Processed"], color="#d62728", alpha=0.3, label="Strong Sites (>400°C)")
+        ax.plot(clean_df["Temperature"], clean_df["TCD_Processed"], color=curve_color, linewidth=line_width, label="CO₂ Signal")
+
+        if color_mode == "Shade by Basic Site Regions":
+            ax.fill_between(df_weak["Temperature"], df_weak["TCD_Processed"], color=weak_color, alpha=fill_alpha, label=f"Weak (<{weak_max:.0f}°C)")
+            ax.fill_between(df_med["Temperature"], df_med["TCD_Processed"], color=med_color, alpha=fill_alpha, label=f"Medium ({weak_max:.0f}-{medium_max:.0f}°C)")
+            ax.fill_between(df_strong["Temperature"], df_strong["TCD_Processed"], color=strong_color, alpha=fill_alpha, label=f"Strong (>{medium_max:.0f}°C)")
             ax.legend(fontsize=tick_size - 1, frameon=False)
         else:
-            ax.fill_between(clean_df["Temperature"], clean_df["TCD_Processed"], color=style_color, alpha=0.15)
+            ax.fill_between(clean_df["Temperature"], clean_df["TCD_Processed"], color=single_fill_color, alpha=fill_alpha)
 
-        ax.set_xlabel("Temperature (°C)", fontsize=label_size, fontweight=font_weight)
-        ax.set_ylabel("TCD Signal (a.u. / g_cat)", fontsize=label_size, fontweight=font_weight)
-        ax.set_title("CO₂ Temperature-Programmed Desorption Profile", fontsize=title_size, fontweight=font_weight)
-        
-        ax.tick_params(axis="both", which="major", labelsize=tick_size)
-        ax.xaxis.set_minor_locator(AutoMinorLocator())
-        ax.yaxis.set_minor_locator(AutoMinorLocator())
-        
-        if grid_enabled:
+        ax.set_xlabel(xlabel_text, fontsize=label_size, fontweight=font_weight)
+        ax.set_ylabel(ylabel_text, fontsize=label_size, fontweight=font_weight)
+        ax.set_title(title_text, fontsize=title_size, fontweight=font_weight)
+
+        # Axis scaling
+        if not auto_x:
+            ax.set_xlim(x_min, x_max)
+        if not auto_y:
+            ax.set_ylim(y_min, y_max)
+
+        # Ticks and Grid toggles
+        if show_major_ticks:
+            ax.tick_params(axis="both", which="major", labelsize=tick_size, bottom=True, left=True)
+        else:
+            ax.tick_params(axis="both", which="major", bottom=False, left=False, labelbottom=False, labelleft=False)
+
+        if show_minor_ticks and show_major_ticks:
+            ax.xaxis.set_minor_locator(AutoMinorLocator())
+            ax.yaxis.set_minor_locator(AutoMinorLocator())
+            ax.tick_params(axis="both", which="minor", bottom=True, left=True)
+        else:
+            ax.tick_params(axis="both", which="minor", bottom=False, left=False)
+
+        if show_grid:
             ax.grid(True, linestyle="--", alpha=0.5)
 
-        if not show_box:
+        if not show_box_border:
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
 
-        # --- DASHBOARD DISPLAY ---
-        col1, col2 = st.columns([2, 1])
-        
+        # --- MAIN DISPLAY LAYOUT ---
+        col1, col2 = st.columns([1.6, 1])
+
         with col1:
             st.pyplot(fig)
-            
             img_buffer = io.BytesIO()
             fig.savefig(img_buffer, format="png", dpi=dpi_val, bbox_inches="tight")
             st.download_button(
                 label="📥 Download High-Res Plot (PNG)",
                 data=img_buffer.getvalue(),
-                file_name="CO2_TPD_Basic_Sites_Graph.png",
+                file_name="CO2_TPD_Publication_Plot.png",
                 mime="image/png"
             )
 
         with col2:
-            st.subheader("📊 Basic Sites Distribution")
-            
+            st.subheader("📊 Quantified Basic Sites")
             summary_table = pd.DataFrame({
-                "Basic Site Type": ["Weak Sites", "Medium Sites", "Strong Sites", "Total"],
-                "Temperature Range": [f"< {weak_max:.0f} °C", f"{weak_max:.0f} – {medium_max:.0f} °C", f"> {medium_max:.0f} °C", "Full Spectrum"],
-                "Desorption Area (a.u.*°C/g)": [f"{area_weak:.2f}", f"{area_med:.2f}", f"{area_strong:.2f}", f"{total_desorption_area:.2f}"],
-                "Distribution (%)": [f"{pct_weak:.1f} %", f"{pct_med:.1f} %", f"{pct_strong:.1f} %", "100.0 %"]
+                "Site Type": ["Weak Sites", "Medium Sites", "Strong Sites", "Total Surface Basicity"],
+                "Temp Range": [f"< {weak_max:.0f} °C", f"{weak_max:.0f} – {medium_max:.0f} °C", f"> {medium_max:.0f} °C", "Full Profile"],
+                "Desorption Area": [f"{area_weak:.2f}", f"{area_med:.2f}", f"{area_strong:.2f}", f"{total_area:.2f}"],
+                "Fraction (%)": [f"{pct_weak:.1f} %", f"{pct_med:.1f} %", f"{pct_strong:.1f} %", "100.0 %"]
             })
-            
             st.dataframe(summary_table, hide_index=True, use_container_width=True)
-            
-            st.markdown("---")
+
             max_idx = clean_df["TCD_Processed"].idxmax()
             peak_temp = clean_df.loc[max_idx, "Temperature"]
-            st.metric("Desorption Peak Temperature (T_max)", f"{peak_temp:.1f} °C")
-            st.metric("Sample Weight Used", f"{sample_mass} mg")
+            st.metric("Primary Peak Temperature (T_max)", f"{peak_temp:.1f} °C")
+            st.metric("Sample Mass Evaluated", f"{sample_mass} mg")
+
+        # --- LITERATURE COMPARISON & CATALYTIC EVALUATION MODULE ---
+        st.markdown("---")
+        st.header("🧠 Literature Comparison & Methanol Synthesis Correlation")
+
+        cat_col1, cat_col2 = st.columns(2)
+
+        with cat_col1:
+            st.subheader("📌 Main Conclusions from Profile")
+            
+            # Automated rules derived from heterogeneous catalysis literature for CO2 hydrogenation
+            dominant_site = "Weak" if pct_weak >= max(pct_med, pct_strong) else ("Medium" if pct_med >= pct_strong else "Strong")
+            
+            st.write(f"• **Dominant Surface Species:** The catalyst profile is dominated by **{dominant_site} Basic Sites** ({max(pct_weak, pct_med, pct_strong):.1f}% of total basicity).")
+            st.write(f"• **Desorption Thermal Maxima ($T_{{max}}$):** Primary peak occurs at **{peak_temp:.1f} °C**.")
+            
+            if peak_temp < 200:
+                st.write("• **Site Nature:** Primarily weak hydroxyl groups ($\text{OH}^-$) or bicarbonate surface species formed on mild surface sites.")
+            elif 200 <= peak_temp <= 400:
+                st.write("• **Site Nature:** Predominantly medium-strength metal–oxygen pairs ($\text{Cu-O-Zr}$, $\text{Zn-O-Zr}$, or $\text{In-O}$ oxygen vacancies) coordinating bidentate carbonates.")
+            else:
+                st.write("• **Site Nature:** Strong isolated low-coordinated oxygen anions ($\text{O}^{2-}$), inducing stable monodentate carbonate formation.")
+
+        with cat_col2:
+            st.subheader("💡 Correlation to $\\text{CO}_2/\\text{CO}/\\text{H}_2$ Methanol Synthesis")
+            
+            if pct_med >= 40.0:
+                st.success("🟢 **HIGH CATALYTIC POTENTIAL FOR METHANOL SYNTHESIS**")
+                st.write(
+                    "**Literature Benchmark:** In $\\text{CO}_2/\\text{CO}/\\text{H}_2$ feed mixtures (e.g., $\\text{Cu/ZnO/ZrO}_2$ or $\\text{In}_2\\text{O}_3$-based systems), "
+                    "**medium basic sites ($200-400\\,^\\circ\\text{C}$)** are recognized as the active sites for optimal $\\text{CO}_2$ activation. "
+                    "They bind $\\text{CO}_2$ with moderate adsorption enthalpy, stabilizing reaction intermediates ($*\\text{HCOO}$ formate species) "
+                    "without poisoning active sites, enabling rapid hydrogenation to $\\text{CH}_3\\text{OH}$."
+                )
+            elif pct_weak > 50.0:
+                st.warning("🟡 **MODERATE ACTIVITY (WEAK BINDING DOMINATED)**")
+                st.write(
+                    "**Literature Benchmark:** High concentration of weak basic sites ($<200\\,^\\circ\\text{C}$) leads to low $\\text{CO}_2$ residence time "
+                    "and quick desorption before hydrogenation by $\\text{H}_2$ occurs. Expect lower single-pass $\\text{CO}_2$ conversion under industrial reaction conditions ($220-260\\,^\\circ\\text{C}$)."
+                )
+            else:
+                st.error("🔴 **POTENTIAL CARBONATE POISONING / HIGH RWGS SELECTIVITY**")
+                st.write(
+                    "**Literature Benchmark:** Excessive strong basic sites ($>400\\,^\\circ\\text{C}$) hold $\\text{CO}_2$ too strongly, forming rigid monodentate carbonates. "
+                    "This often poisons active sites for methanol production, promoting either deep hydrogenation to $\\text{CH}_4$ or increasing Reverse Water-Gas Shift (RWGS) side-reaction to $\\text{CO}$."
+                )
 
     except Exception as e:
-        st.error(f"Error processing data file: {e}")
+        st.error(f"Error executing analysis: {e}")
 else:
-    st.info("👋 Upload a CO₂-TPD `.xlsx` or `.xls` data file via the sidebar to get started.")
+    st.info("👋 Upload a CO₂-TPD dataset via the sidebar to access custom plotting, quantification, and literature comparison.")
