@@ -17,22 +17,29 @@ st.markdown("Instantly parse Excel files, calculate desorption metrics, and gene
 
 # --- SIDEBAR: DATA UPLOAD & COLUMN PARSING ---
 st.sidebar.header("1. Data Input & Mass Normalization")
-uploaded_file = st.sidebar.file_bytes = st.sidebar.file_uploader("Upload TPD Excel (.xlsx / .xls)", type=["xlsx", "xls"])
+uploaded_file = st.sidebar.file_uploader("Upload TPD Excel (.xlsx / .xls)", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
     try:
-        # Load sheets
-        excel_file = pd.ExcelFile(uploaded_file)
+        # Determine appropriate engine based on file extension
+        filename = uploaded_file.name.lower()
+        if filename.endswith(".xls"):
+            engine = "xlrd"
+        else:
+            engine = "openpyxl"
+
+        # Load Excel file with explicit engine
+        excel_file = pd.ExcelFile(uploaded_file, engine=engine)
         sheet_name = st.sidebar.selectbox("Select Excel Sheet", excel_file.sheet_names)
         
         # Row header skip selector
         header_row = st.sidebar.number_input("Header Row (0-indexed)", min_value=0, max_value=50, value=0)
-        df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row)
+        df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row, engine=engine)
         
         st.sidebar.subheader("Column Mapping")
         all_cols = list(df.columns)
         
-        # Smart search for probable columns
+        # Smart search for probable temperature and TCD columns
         temp_default = next((i for i, c in enumerate(all_cols) if "temp" in str(c).lower()), 0)
         tcd_default = next((i for i, c in enumerate(all_cols) if "tcd" in str(c).lower() or "signal" in str(c).lower()), min(1, len(all_cols)-1))
         
@@ -51,9 +58,9 @@ if uploaded_file is not None:
         clean_df = clean_df.dropna().sort_values("Temperature")
         
         # Mass-normalized signal
-        clean_df["TCD_Norm"] = (clean_df["TCD"] / sample_mass) * 1000  # Signal / g
+        clean_df["TCD_Norm"] = (clean_df["TCD"] / sample_mass) * 1000  # Signal per gram basis
         
-        # Optional baseline offset subtraction
+        # Linear baseline offset subtraction
         if baseline_subtraction:
             baseline = np.linspace(clean_df["TCD_Norm"].iloc[0], clean_df["TCD_Norm"].iloc[-1], len(clean_df))
             clean_df["TCD_Processed"] = clean_df["TCD_Norm"] - baseline
@@ -61,7 +68,7 @@ if uploaded_file is not None:
         else:
             clean_df["TCD_Processed"] = clean_df["TCD_Norm"]
 
-        # Peak Analysis (Simpson Rule Integration)
+        # Peak Integration (Simpson's Rule)
         total_desorption_area = simpson(y=clean_df["TCD_Processed"].values, x=clean_df["Temperature"].values)
 
         # --- GRAPH CUSTOMIZATION CONTROLS ---
@@ -96,7 +103,7 @@ if uploaded_file is not None:
         # --- PLOTTING ENGINE ---
         fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=150)
         
-        # Apply Preset Rules
+        # Apply Selected Preset Formatting
         style_color = "#1f77b4"
         bg_color = "white"
         show_box = True
@@ -138,11 +145,11 @@ if uploaded_file is not None:
 
         plt.rcParams["font.family"] = font_family
 
-        # Main Plotting Execution
+        # Plot Data Series
         ax.plot(clean_df["Temperature"], clean_df["TCD_Processed"], color=style_color, linewidth=line_width, label="CO₂ Desorption")
         ax.fill_between(clean_df["Temperature"], clean_df["TCD_Processed"], color=style_color, alpha=0.15)
         
-        # Axis Titles & Typography
+        # Axis Labels & Titles
         ax.set_xlabel("Temperature (°C)", fontsize=label_size, fontweight=font_weight)
         ax.set_ylabel("TCD Signal (a.u. / g_cat)", fontsize=label_size, fontweight=font_weight)
         ax.set_title("CO₂ Temperature-Programmed Desorption", fontsize=title_size, fontweight=font_weight)
@@ -164,7 +171,7 @@ if uploaded_file is not None:
         with col1:
             st.pyplot(fig)
             
-            # Image export buffer
+            # Export plot buffer
             img_buffer = io.BytesIO()
             fig.savefig(img_buffer, format="png", dpi=dpi_val, bbox_inches="tight")
             st.download_button(
