@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 st.title("🧪 CO₂-TPD Data Processor & Plotter")
-st.markdown("Instantly parse Excel files, calculate desorption metrics, and generate publication-ready TCD vs. Temperature figures.")
+st.markdown("Instantly parse multi-block Excel files (e.g., Micromeritics), calculate desorption metrics, and generate publication-ready plots.")
 
 def clean_numeric_series(series):
     """Converts a pandas series to numeric floats, stripping text, units, and converting European decimal commas."""
@@ -39,66 +39,83 @@ uploaded_file = st.sidebar.file_uploader("Upload TPD Excel (.xlsx / .xls)", type
 
 if uploaded_file is not None:
     try:
-        # Determine engine based on extension
         filename = uploaded_file.name.lower()
         engine = "xlrd" if filename.endswith(".xls") else "openpyxl"
 
-        # Read sheet list
         excel_file = pd.ExcelFile(uploaded_file, engine=engine)
         sheet_name = st.sidebar.selectbox("Select Excel Sheet", excel_file.sheet_names)
         
-        # Read raw preview to auto-suggest header row
-        raw_preview = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None, nrows=40, engine=engine)
+        # Read raw headerless sheet preview to locate multi-block data
+        raw_full = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None, engine=engine)
         
-        # Auto-detect row with multiple numerical values
-        suggested_header = 0
-        for i, row in raw_preview.iterrows():
-            num_count = sum(clean_numeric_series(row).notna())
-            if num_count >= 2:
-                suggested_header = max(0, i - 1) if i > 0 else 0
+        # Search for row containing 'TCD Signal (a.u.) vs. Temperature' or 'Temperat'
+        default_header_idx = 23
+        for r_idx, row_vals in raw_full.iterrows():
+            row_str = " ".join([str(v) for v in row_vals.values if pd.notna(v)])
+            if "Temperature" in row_str and "TCD" in row_str:
+                default_header_idx = r_idx + 3  # Header is usually 3 rows below section label
                 break
 
-        header_row = st.sidebar.number_input("Header Row (0-indexed)", min_value=0, max_value=100, value=suggested_header)
-        df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row, engine=engine)
+        header_row = st.sidebar.number_input("Header Row (0-indexed)", min_value=0, max_value=100, value=default_header_idx)
         
-        if df.empty:
-            st.error("The selected sheet or header row resulted in an empty table. Please adjust the Header Row index.")
-            st.stop()
+        # Load dataset without header first to select exact column letter/index positionally
+        df_raw = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=None, engine=engine)
+        
+        # Create user selection list showing Column Letter + Header Name
+        header_vals = df_raw.iloc[header_row].values
+        col_options = []
+        for i, val in enumerate(header_vals):
+            col_letter = pd.Series([i + 1]).apply(lambda x: pd.Series(x).get(0)).values[0]
+            # Convert numeric index to Excel column name (A, B, C... M, N)
+            col_name = ""
+            temp_i = i
+            while temp_i >= 0:
+                col_name = chr(temp_i % 26 + 65) + col_name
+                temp_i = temp_i // 26 - 1
+            
+            header_str = str(val) if pd.notna(val) else "Unnamed"
+            col_options.append(f"Col {col_name} (Idx {i}): {header_str}")
 
         st.sidebar.subheader("Column Mapping")
-        all_cols = [str(c) for c in df.columns]
         
-        # Smart detection for temperature and signal columns
-        temp_default = next((i for i, c in enumerate(all_cols) if any(k in c.lower() for k in ["temp", "t (°c)", "t/°c", "temperature"])), 0)
-        tcd_default = next((i for i, c in enumerate(all_cols) if any(k in c.lower() for k in ["tcd", "signal", "ms", "mv", "intensity"])), min(1, len(all_cols)-1))
+        # Default to Column M (12) for Temp and Column N (13) for TCD if present
+        def_temp_col = 12 if len(col_options) > 12 else 0
+        def_tcd_col = 13 if len(col_options) > 13 else min(1, len(col_options)-1)
+
+        temp_col_sel = st.sidebar.selectbox("Temperature Column", col_options, index=def_temp_col)
+        tcd_col_sel = st.sidebar.selectbox("TCD Signal Column", col_options, index=def_tcd_col)
         
-        temp_col = st.sidebar.selectbox("Temperature Column", all_cols, index=temp_default)
-        tcd_col = st.sidebar.selectbox("TCD Signal Column", all_cols, index=tcd_default)
+        # Extract 0-indexed column positions
+        temp_idx = int(temp_col_sel.split("Idx ")[1].split(")")[0])
+        tcd_idx = int(tcd_col_sel.split("Idx ")[1].split(")")[0])
+
+        # Slice target numeric data starting right after header_row
+        data_df = df_raw.iloc[header_row + 1:].copy()
         
         # Raw Data Inspection Box
-        with st.sidebar.expander("🔍 Inspect Raw Selected Columns", expanded=False):
-            st.write("First 15 raw rows:")
-            st.dataframe(df[[temp_col, tcd_col]].head(15))
+        with st.sidebar.expander("🔍 Inspect Selected Columns", expanded=True):
+            inspect_df = pd.DataFrame({
+                "Temp Raw": data_df.iloc[:, temp_idx].head(10),
+                "TCD Raw": data_df.iloc[:, tcd_idx].head(10)
+            })
+            st.dataframe(inspect_df)
             
-            raw_t = clean_numeric_series(df[temp_col])
-            raw_s = clean_numeric_series(df[tcd_col])
-            valid_pts = (raw_t.notna() & raw_s.notna()).sum()
+            valid_pts = (clean_numeric_series(data_df.iloc[:, temp_idx]).notna() & 
+                         clean_numeric_series(data_df.iloc[:, tcd_idx]).notna()).sum()
             st.info(f"Valid numeric rows found: **{valid_pts}**")
 
         # Sample & Baseline Parameters
-        sample_mass = st.sidebar.number_input("Sample Mass (mg)", min_value=0.1, value=100.0, step=1.0)
+        sample_mass = st.sidebar.number_input("Sample Mass (mg)", min_value=0.1, value=50.0, step=0.1)
         baseline_subtraction = st.sidebar.checkbox("Apply Linear Baseline Correction", value=True)
         
         # --- CLEANING & PRE-PROCESSING DATA ---
         clean_df = pd.DataFrame({
-            "Temperature": clean_numeric_series(df[temp_col]),
-            "TCD": clean_numeric_series(df[tcd_col])
-        })
-        
-        clean_df = clean_df.dropna().sort_values("Temperature").reset_index(drop=True)
+            "Temperature": clean_numeric_series(data_df.iloc[:, temp_idx]),
+            "TCD": clean_numeric_series(data_df.iloc[:, tcd_idx])
+        }).dropna().sort_values("Temperature").reset_index(drop=True)
         
         if len(clean_df) < 2:
-            st.error("Not enough numeric data points found. Check 'Inspect Raw Selected Columns' in the sidebar to ensure your chosen Header Row and Column selections contain actual numeric numbers.")
+            st.error("Not enough numeric data points found. Adjust 'Header Row' to row 23 or check column selections.")
             st.stop()
 
         # Mass normalization (Signal per gram basis)
