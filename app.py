@@ -36,6 +36,10 @@ if uploaded_file is not None:
         header_row = st.sidebar.number_input("Header Row (0-indexed)", min_value=0, max_value=50, value=0)
         df = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row, engine=engine)
         
+        if df.empty:
+            st.error("The selected sheet/header row resulted in an empty dataset. Try adjusting the Header Row index.")
+            st.stop()
+
         st.sidebar.subheader("Column Mapping")
         all_cols = list(df.columns)
         
@@ -51,18 +55,27 @@ if uploaded_file is not None:
         baseline_subtraction = st.sidebar.checkbox("Apply Linear Baseline Correction", value=True)
         
         # --- CLEANING & PRE-PROCESSING DATA ---
-        clean_df = df[[temp_col, tcd_col]].dropna().copy()
+        clean_df = df[[temp_col, tcd_col]].copy()
         clean_df.columns = ["Temperature", "TCD"]
+        
+        # Coerce numeric values and remove non-numeric rows (e.g. text/units)
         clean_df["Temperature"] = pd.to_numeric(clean_df["Temperature"], errors="coerce")
         clean_df["TCD"] = pd.to_numeric(clean_df["TCD"], errors="coerce")
-        clean_df = clean_df.dropna().sort_values("Temperature")
+        clean_df = clean_df.dropna().sort_values("Temperature").reset_index(drop=True)
         
+        # Validate cleaned DataFrame size before indexing
+        if len(clean_df) < 2:
+            st.error("Not enough valid numeric data points found in the selected columns. Please verify your column selections or adjust the Header Row.")
+            st.stop()
+
         # Mass-normalized signal
         clean_df["TCD_Norm"] = (clean_df["TCD"] / sample_mass) * 1000  # Signal per gram basis
         
-        # Linear baseline offset subtraction
+        # Linear baseline offset subtraction safely applied with bounded bounds
         if baseline_subtraction:
-            baseline = np.linspace(clean_df["TCD_Norm"].iloc[0], clean_df["TCD_Norm"].iloc[-1], len(clean_df))
+            start_val = clean_df["TCD_Norm"].iloc[0]
+            end_val = clean_df["TCD_Norm"].iloc[-1]
+            baseline = np.linspace(start_val, end_val, len(clean_df))
             clean_df["TCD_Processed"] = clean_df["TCD_Norm"] - baseline
             clean_df["TCD_Processed"] = clean_df["TCD_Processed"].clip(lower=0)
         else:
@@ -184,7 +197,10 @@ if uploaded_file is not None:
         with col2:
             st.subheader("📊 Desorption Metrics")
             st.metric("Total Integrated Area", f"{total_desorption_area:.2f} a.u.*°C/g")
-            st.metric("Peak Temperature (T_max)", f"{clean_df.loc[clean_df['TCD_Processed'].idxmax(), 'Temperature']:.1f} °C")
+            
+            max_idx = clean_df["TCD_Processed"].idxmax()
+            peak_temp = clean_df.loc[max_idx, "Temperature"]
+            st.metric("Peak Temperature (T_max)", f"{peak_temp:.1f} °C")
             st.metric("Sample Weight Used", f"{sample_mass} mg")
             
             st.markdown("---")
@@ -192,6 +208,6 @@ if uploaded_file is not None:
             st.dataframe(clean_df[["Temperature", "TCD_Processed"]].head(10), use_container_width=True)
 
     except Exception as e:
-        st.error(f"Error parsing file: {e}")
+        st.error(f"Error processing data: {e}")
 else:
     st.info("👋 Upload a CO₂-TPD `.xlsx` or `.xls` data file via the sidebar to get started.")
