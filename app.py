@@ -547,3 +547,4 @@ if uploaded_file is not None:
                  "or a sheet that doesn't contain a clean numeric TPD block. Adjust the sidebar settings and retry.")
 else:
     st.info("👋 Upload a CO₂-TPD dataset via the sidebar to access custom plotting, quantification, and literature comparison.")
+
